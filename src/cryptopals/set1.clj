@@ -1,7 +1,10 @@
 (ns cryptopals.set1
   (:require [clojure.string :as s]
             [clojure.java.io :as io])
-  (:import java.util.Base64))
+  (:import java.util.Base64
+           (javax.crypto Cipher KeyGenerator SecretKey)
+           (javax.crypto.spec SecretKeySpec)
+           (java.security SecureRandom)))
 
 (def common-english-words #{"the" "be" "to" "of" "and" "a" "in" "that"
 "have" "I" "it" "for" "not" "on" "with" "he" "as" "you" "do" "at"
@@ -16,27 +19,27 @@
 
 ;; this needs some tweaking:
 ;; adapted from http://en.wikipedia.org/wiki/Letter_frequency
-(def english-freq-table {\space, 20
-                         \e, 15
-                         \t, 10
-                         \a, 8
-                         \o, 8
-                         \i, 8
-                         \n, 6
-                         \s, 6
-                         \h, 6
-                         \r, 5
-                         \d, 4
-                         \l, 4
-                         \c, 2
-                         \u, 2
-                         \m, 2
-                         \w, 2
-                         \f, 2
-                         \g, 2
-                         \y, 1
-                         \p, 1
-                         \b, 1})
+(def english-freq-table {\space 20,
+                         \e 15,
+                         \t 10,
+                         \a 8,
+                         \o 8,
+                         \i 8,
+                         \n 6,
+                         \s 6,
+                         \h 6,
+                         \r 5,
+                         \d 4,
+                         \l 4,
+                         \c 2,
+                         \u 2,
+                         \m 2,
+                         \w 2,
+                         \f 2,
+                         \g 2,
+                         \y 1,
+                         \p 1,
+                         \b 1})
 
 (defn remove-linebreaks [str]
   (s/replace str #"\n" ""))
@@ -197,7 +200,7 @@
     (double (/ (+ (fn-norm a b) (fn-norm a c) (fn-norm a d) (fn-norm b c) (fn-norm b d) (fn-norm c d)) 6))))
 
 (defn- guess-key-lengths
-  "Guess key lengths based on minimum normalized hamming distances. Smaller scores are better"
+  "Guess key lengths based on minimum normalized hamming distances. Smaller scores are better."
   [input]
   (map :length
        (sort-by :score
@@ -222,4 +225,50 @@
         result (try-decrypt input key-length)]
     (println (str "Key: " (:key result)))
     (println (str "Length: " (count (:key result))))
+    (println)
     (println (:msg result))))
+
+
+;; Challenge 7
+;; Remember that everything I have takes seqs of bytes
+
+(defn b64-slurp [f]
+  (b64-decode (remove-linebreaks (slurp (io/resource f)))))
+
+(def ^:private aes-ecb "AES/ECB/PKCS5Padding")
+
+(defn get-cipher [mode key]
+  (let [key-spec (SecretKeySpec. (byte-array key) "AES")
+        cipher (Cipher/getInstance aes-ecb)]
+    (.init cipher mode key-spec)
+    cipher))
+
+(defn aes-ecb-encrypt [text key]
+  (let [plaintext (byte-array text)
+        cipher (get-cipher Cipher/ENCRYPT_MODE key)]
+    (b64-encode (.doFinal cipher plaintext))))
+
+(defn aes-ecb-decrypt [text key]
+  (let [cipher (get-cipher Cipher/DECRYPT_MODE key)
+        ciphertext (byte-array text)]
+    (String. (.doFinal cipher ciphertext))))
+
+(defn run7 []
+  (aes-ecb-decrypt c7data "YELLOW SUBMARINE"))
+
+
+;; Challenge 8
+
+(defn find-patterns [b]
+  (let [block-freqs (frequencies (partition-all 16 b))
+         counts (map second block-freqs)]
+    (apply max counts)))
+
+ (defn run8 []
+   (let [strings (s/split (slurp (io/resource "8.txt")) #"\n")
+         byte-strings (map hex->bytes strings)]
+     (bytes->hex
+      (first
+       (filter
+        (fn [x] (> (find-patterns x) 1))
+        byte-strings)))))
