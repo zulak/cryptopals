@@ -235,7 +235,7 @@
 (defn b64-slurp [f]
   (b64-decode (remove-linebreaks (slurp (io/resource f)))))
 
-(def ^:private aes-ecb "AES/ECB/PKCS5Padding")
+(def ^:private aes-ecb "AES/ECB/NoPadding")
 
 (defn get-cipher [mode key]
   (let [key-spec (SecretKeySpec. (byte-array key) "AES")
@@ -251,8 +251,7 @@
 (defn aes-ecb-decrypt [text key]
   (let [cipher (get-cipher Cipher/DECRYPT_MODE key)
         ciphertext (byte-array text)]
-    (String. (.doFinal cipher ciphertext))))
-
+    (seq (.doFinal cipher ciphertext))))
 (defn run7 []
   (aes-ecb-decrypt c7data "YELLOW SUBMARINE"))
 
@@ -272,3 +271,34 @@
        (filter
         (fn [x] (> (find-patterns x) 1))
         byte-strings)))))
+
+
+;; Challenge 9
+
+(defn add-padding [length b]
+  (let [num-padding-bytes (- length (count b))
+        result (vec b)]
+    (if (<= num-padding-bytes 0)
+      b
+      (into result (repeat num-padding-bytes num-padding-bytes)))))
+
+
+;; Challenge 10
+
+(defn aes-cbc-decrypt [ciphertext key iv]
+  (loop [blocks (partition-all 16 ciphertext)
+         prev-block iv
+         plaintext []]
+    (if (empty? blocks)
+      plaintext
+      (let [block (add-padding 16 (first blocks))
+            decrypted-block (aes-ecb-decrypt block key)
+            plaintext-block (fixed-xor decrypted-block prev-block)]
+        (recur (rest blocks) block (conj plaintext plaintext-block))))))
+
+(defn run10 []
+  (let [input (b64-slurp "10.txt")
+        key (str->bytes "YELLOW SUBMARINE")
+        iv (repeat 16 0)
+        plaintext (aes-cbc-decrypt input key iv)]
+    (println (apply str (mapcat #(map char %) plaintext)))))

@@ -62,3 +62,8 @@
     (let [before [1 2 3 4 5 6]
           after [[1 4] [2 5] [3 6]]]
       (is (= after (transpose before 3))))))
+
+(deftest test-challenge-9
+  (is (= (map char
+              (add-padding (str->bytes "YELLOW SUBMARINE") 20))
+         '(\Y \E \L \L \O \W \space \S \U \B \M \A \R \I \N \E \ \ \ \))))
