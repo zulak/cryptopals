@@ -246,12 +246,13 @@
 (defn aes-ecb-encrypt [text key]
   (let [plaintext (byte-array text)
         cipher (get-cipher Cipher/ENCRYPT_MODE key)]
-    (b64-encode (.doFinal cipher plaintext))))
+    (vec (.doFinal cipher plaintext))))
 
 (defn aes-ecb-decrypt [text key]
   (let [cipher (get-cipher Cipher/DECRYPT_MODE key)
         ciphertext (byte-array text)]
-    (seq (.doFinal cipher ciphertext))))
+    (vec (.doFinal cipher ciphertext))))
+
 (defn run7 []
   (aes-ecb-decrypt c7data "YELLOW SUBMARINE"))
 
@@ -302,3 +303,21 @@
         iv (repeat 16 0)
         plaintext (aes-cbc-decrypt input key iv)]
     (println (apply str (mapcat #(map char %) plaintext)))))
+
+
+;; Challenge 11
+
+(defn cbc-encrypt [key plaintext]
+  (mapcat (fn [x] (aes-ecb-encrypt (add-padding 16 x) key)) (partition-all 16 plaintext)))
+
+(defn ecb-encrypt [key iv plaintext])
+
+(defn get-random-key []
+  (repeatedly 16 #(rand-int 255)))
+
+(defn encrypt-msg [mode key input]
+  (condp = mode
+    :cbc (fn []
+           )
+    :ecb "ecb"
+    ))
