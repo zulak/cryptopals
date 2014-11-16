@@ -254,7 +254,7 @@
     (vec (.doFinal cipher ciphertext))))
 
 (defn run7 []
-  (aes-ecb-decrypt c7data "YELLOW SUBMARINE"))
+  (aes-ecb-decrypt (b64-slurp "7.txt") "YELLOW SUBMARINE"))
 
 
 ;; Challenge 8
@@ -286,7 +286,18 @@
 
 ;; Challenge 10
 
-(defn aes-cbc-decrypt [ciphertext key iv]
+(defn cbc-encrypt-msg [key iv plaintext]
+  (loop [blocks (partition-all 16 plaintext)
+         prev-block iv
+         ciphertext []]
+    (if (empty? blocks)
+      ciphertext
+      (let [block (add-padding 16 (first blocks))
+            xored-block (fixed-xor prev-block block)
+            encrypted-block (aes-ecb-encrypt xored-block key)]
+        (recur (rest blocks) encrypted-block (into ciphertext encrypted-block))))))
+
+(defn cbc-decrypt-msg [key iv ciphertext]
   (loop [blocks (partition-all 16 ciphertext)
          prev-block iv
          plaintext []]
@@ -295,29 +306,156 @@
       (let [block (add-padding 16 (first blocks))
             decrypted-block (aes-ecb-decrypt block key)
             plaintext-block (fixed-xor decrypted-block prev-block)]
-        (recur (rest blocks) block (conj plaintext plaintext-block))))))
+        (recur (rest blocks) block (into plaintext plaintext-block))))))
 
 (defn run10 []
   (let [input (b64-slurp "10.txt")
         key (str->bytes "YELLOW SUBMARINE")
         iv (repeat 16 0)
-        plaintext (aes-cbc-decrypt input key iv)]
+        plaintext (cbc-decrypt-msg input key iv)]
     (println (apply str (mapcat #(map char %) plaintext)))))
 
 
 ;; Challenge 11
 
-(defn cbc-encrypt [key plaintext]
-  (mapcat (fn [x] (aes-ecb-encrypt (add-padding 16 x) key)) (partition-all 16 plaintext)))
+(defn ecb-decrypt-msg [key ciphertext]
+  (mapcat (fn [x] (aes-ecb-decrypt x key)) (partition-all 16 ciphertext)))
 
-(defn ecb-encrypt [key iv plaintext])
+(defn ecb-encrypt-msg [key plaintext]
+  (mapcat (fn [x] (aes-ecb-encrypt (add-padding 16 x) key)) (partition-all 16 plaintext)))
 
 (defn get-random-key []
   (repeatedly 16 #(rand-int 255)))
 
-(defn encrypt-msg [mode key input]
-  (condp = mode
-    :cbc (fn []
-           )
-    :ecb "ecb"
+(defn apply-random-padding [input]
+  (let [prefix-length (+ 5 (rand-int 7))
+        suffix-length (+ 5 (rand-int 7))]
+    (-> []
+     (into (repeat prefix-length 0))
+     (into input)
+     (into (repeat suffix-length 0)))
     ))
+
+(defn rand-encrypt-msg [raw-input]
+  (let [mode (rand-nth [:cbc :ecb])
+        key (get-random-key)
+        iv (get-random-key)
+        input (apply-random-padding raw-input)]
+    (condp = mode
+      :cbc (do (println "picked cbc") (cbc-encrypt-msg key iv input))
+      :ecb (do (println "picked ecb") (ecb-encrypt-msg key input))
+      )))
+
+(defn encryption-oracle [encryption-fn]
+  (let [plaintext (repeat 256 (int \A))
+        ciphertext (encryption-fn plaintext)
+        max-repeated-blocks (apply max (map second (frequencies (partition-all 8 ciphertext))))]
+    (if (> max-repeated-blocks 1)
+      :ecb
+      :cbc)))
+
+
+;; challenge 12
+
+(def context (atom {:key (get-random-key)
+                    :secret (b64-slurp "12.txt")}))
+
+(defn known-bytes [num-bytes]
+  (vec (repeat num-bytes (int \A))))
+
+(defn c12-encrypt [ctx plaintext]
+  (ecb-encrypt-msg (:key @ctx) (into (vec plaintext) (:secret @ctx))))
+
+;; The length of an ecb output is always a multiple of the block size.
+;; We can exploit this by adding bytes to the input until the output
+;; size changes.
+;;
+;; The block-size is the delta between the two output sizes.
+(defn guess-block-length [encrypt-fn]
+  (let [initial (count (encrypt-fn (known-bytes 0)))]
+    (loop [length 0]
+      (let [next (count (encrypt-fn (known-bytes (inc length))))]
+        (if (not= initial next)
+          (- next initial)
+          (recur (inc length)))))))
+
+(defn block-for-position [block-size position]
+  (quot position block-size))
+
+(defn get-block-for-position [block-size position ciphertext]
+  (nth (partition-all block-size ciphertext) (block-for-position block-size position)))
+
+(defn padding-for-position [block-size plaintext]
+  (let [plaintext-length (count plaintext)]
+    (known-bytes (- (dec block-size) (mod plaintext-length block-size)))))
+
+;; Because ECB is stateless, all identical input blocks will produce
+;; identical output blocks.
+;;
+;; Here we are creating a block containing 15 fixed values with the
+;; last value containing all possible bytes. We can use this to
+;; comapre against the first block of ciphertext to decrypt the 1st
+;; byte of the secret.
+(defn create-attack-dictionary [encrypt-fn block-size known-plaintext]
+  (let [position (count known-plaintext)
+        prefix (into (padding-for-position block-size known-plaintext) known-plaintext)
+        interesting-bytes (* block-size (inc (block-for-position block-size position)))]
+    (apply hash-map
+           (reduce into [] (for [x (range 0 256)]
+                             [(get-block-for-position block-size position (encrypt-fn (conj prefix x))) x])))))
+
+(defn create-attack-ciphertext [encrypt-fn block-size known-plaintext]
+  (let [position (count known-plaintext)
+        prefix (padding-for-position block-size known-plaintext)]
+    (get-block-for-position block-size position (encrypt-fn prefix))))
+
+(defn c12-get-next-byte [encrypt-fn block-size plaintext]
+  (get
+   (create-attack-dictionary encrypt-fn block-size plaintext)
+   (create-attack-ciphertext encrypt-fn block-size plaintext)))
+
+;; So this is an interesting problem. Because of the way that pkcs#7
+;; padding works, the value of the last padding digit will change as
+;; our oracle function runs. This attack exploits the fact that the
+;; secret portion of the message does not change, so the variable
+;; padding values break it.
+;;
+;; Not sure what to do about this...
+(defn run12 [encrypt-fn block-size]
+  (loop [x 144 plaintext [(c12-get-next-byte encrypt-fn block-size [])]]
+    (if (nil? (last plaintext))
+      (drop-last plaintext)
+      (recur (dec x) (conj plaintext (c12-get-next-byte encrypt-fn block-size plaintext))))))
+
+
+;; challenge 13
+
+(defn parse-kv [kvstr]
+  (reduce #(assoc % (keyword (nth %2 1)) (nth %2 2)) {} (re-seq #"(\w+)=([^&]+)" kvstr)))
+
+(defn profile-for [email]
+  (let [sanitized-email (s/replace email #"(&|=)" "")]
+    (str "email=" sanitized-email "&uid=10&role=user")))
+
+(defn >c13 [email]
+  (ecb-encrypt-msg (:key @context) (str->bytes (profile-for email))))
+
+(defn <c13 [ciphertext]
+  (parse-kv (bytes->ascii (ecb-decrypt-msg (:key @context) ciphertext))))
+
+;; We can exploit the fact that we know the layout of the plaintext.
+;;
+;; - Since the layout of fields in the plaintext is fixed, we pick an
+;; email address such that the text 'admin' appears in its own padded
+;; block.
+;;
+;; - Then we select an email address such that the plaintext 'user'
+;; occurs in its own padded block.
+;;
+;;- In order to change this to 'admin', we simply swap these two
+;; blocks out. Provided that there's no checksum on the message, we
+;; have successfully modified the plaintext.
+(defn run13 []
+  (let [admin-ciphertext (nth (partition-all 16 (>c13 (str (apply str (repeat 10 \B)) "admin" (apply str (repeat 11 (char 11)))))) 1)
+        prefix (vec (take 32 (>c13 (apply str (repeat 13 \z)))))]
+    (<c13 (into prefix admin-ciphertext))))
