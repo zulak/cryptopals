@@ -441,7 +441,7 @@
   (ecb-encrypt-msg (:key @context) (str->bytes (profile-for email))))
 
 (defn <c13 [ciphertext]
-  (parse-kv (bytes->ascii (ecb-decrypt-msg (:key @context) ciphertext))))
+  (parse-kv (bytes->ascii (strip-pkcs7-padding (ecb-decrypt-msg (:key @context) ciphertext)))))
 
 ;; We can exploit the fact that we know the layout of the plaintext.
 ;;
@@ -459,3 +459,30 @@
   (let [admin-ciphertext (nth (partition-all 16 (>c13 (str (apply str (repeat 10 \B)) "admin" (apply str (repeat 11 (char 11)))))) 1)
         prefix (vec (take 32 (>c13 (apply str (repeat 13 \z)))))]
     (<c13 (into prefix admin-ciphertext))))
+
+
+;; challenge 15
+;;
+;; Write a function that takes a plaintext, determines if it has valid
+;; PKCS#7 padding, and strips the padding off.
+
+(defn- validate-padding [block-size last-block]
+  (let [padding-length (last last-block)
+        has-padding (< padding-length block-size)]
+    (if has-padding
+      (let [num-padding-bytes (count
+                               (filter
+                                #(= % padding-length)
+                                (take-last padding-length last-block)))]
+        {:is-valid (= num-padding-bytes padding-length)
+         :length padding-length})
+      {:is-valid true
+       :length 0})))
+
+(defn unpad-plaintext [block-size plaintext]
+  (let [last-block (last (partition-all block-size plaintext))
+        v (validate-padding block-size last-block)]
+    (if (:is-valid v)
+      {:is-valid true
+       :msg (drop-last (:length v) plaintext)}
+      {:is-valid false})))
