@@ -106,9 +106,10 @@
 
 ;; Challenge 2
 
+;; screwed yet again by java's lack of unsigned types...
 (defn fixed-xor [input key]
   (let [pairs (map vector input key)]
-    (map #(bit-xor (first %) (last %)) pairs)))
+    (map #(bit-xor (bit-and 0xff (first %)) (bit-and 0xff (last %))) pairs)))
 
 ;; Challenge 3
 
@@ -293,7 +294,7 @@
     (if (empty? blocks)
       ciphertext
       (let [block (first blocks)
-            xored-block (fixed-xor prev-block block)
+            xored-block (fixed-xor block prev-block)
             encrypted-block (aes-ecb-encrypt xored-block key)]
         (recur (rest blocks) encrypted-block (into ciphertext encrypted-block))))))
 
@@ -325,7 +326,7 @@
   (mapcat (fn [x] (aes-ecb-encrypt x key)) (partition-all 16 (add-padding 16 plaintext))))
 
 (defn get-random-key []
-  (repeatedly 16 #(rand-int 255)))
+  (repeatedly 16 #(rand-int 256)))
 
 (defn apply-random-padding [input]
   (let [prefix-length (+ 5 (rand-int 7))
@@ -358,6 +359,7 @@
 ;; challenge 12
 
 (def context (atom {:key (get-random-key)
+                    :iv (get-random-key)
                     :secret (b64-slurp "12.txt")
                     :random-prefix (repeatedly (rand-int 32) #(rand-int 256))}))
 
@@ -535,3 +537,53 @@
       {:is-valid true
        :msg (drop-last (:length v) plaintext)}
       {:is-valid false})))
+
+
+;; challenge 16
+
+(defn- escape-str [str]
+  (-> str
+      (s/replace #";" "%3B")
+      ( s/replace #"=" "%3D")))
+
+(defn- create-cookie [userdata]
+  (str "comment1=cooking%20MCs;userdata=" (escape-str userdata) ";comment2=%20like%20a%20pound%20of%20bacon"))
+
+(defn encrypt-cookie [ctx userdata]
+  (cbc-encrypt-msg (:key @ctx) (:iv @ctx) (str->bytes (create-cookie userdata))))
+
+(defn decrypt-cookie [ctx ciphertext]
+  (let [plaintext (cbc-decrypt-msg (:key @ctx) (:iv @ctx) ciphertext)]
+    (println (bytes->ascii plaintext))
+    (re-find #";admin=true" (bytes->ascii plaintext))))
+
+;; what we're trying to do...
+;;
+;; produce an input-string with ';admin=true' in it.
+;;
+;; How can we do this?
+;;
+;; 1. find how many bytes of padding are required until we enter a new block (conveniently, this falls exactly on the block-boundary already)
+;; 2. determine the positions of the characters we want to change (';' + '=')
+;; 3. mangle the previous block of ciphertext such that when it is XOR'd with the decrypted block, we will have the desired values set.
+;; recall that A ^ B ^ A = B; therefore B = A ^ x -> A ^ B = x
+
+;; ;min=ue -> %3Bmin%3Due
+;; we need to modify the following bytes: ***---***----------
+;;
+;; (75 42 82 -127 -119 83 51 97 8 48 -84 112 66 -99 -78
+(def corrupt-ciphertext [78 78 16 -113 53 -109 -124 -109 -29 56 94 93 -47 -19 21 -47
+                         (bit-xor 75 (int \;)) -77 -72 115 47 3 58 71 74 -102 48 -44 16 3 107 -59
+                         75 42 82 -127 -119 83 51 97 8 48 -84 112 66 -99 -78 85 60 96 -91 122 -12 31 42 -18 -100 -108 53 74 -27 -102 -9 -40 120 84 86 -95 -18 54 25 -67 -39 -88 18 -44 -118 -59 20 -84 -45 -76 99 -13 -79 29 114 -49 -54 10 -104 -106 108 -88 -65 -75])
+
+;; TODO: generate this block automatically.
+(def mask [(bit-and 0xff (bit-xor (bit-xor 246 (int \%)) (int \;))) (bit-xor (bit-xor 110 (int \3)) (int \a)) (bit-xor (bit-xor (int \B) 18) (int \d))  -89 -76 49 (bit-xor (bit-xor -27 (int \%)) (int \=)) (int \t) (int \r) 0 0 0 0 0 0 0])
+
+(defn mangle []
+  (let [ciphertext (encrypt-cookie context ";min=ue")
+        blocks (partition-all 16 ciphertext)
+        evil-block mask]
+    (println (second blocks))
+    (-> (into [] (first blocks))
+        (into evil-block)
+        (into (drop 32 ciphertext)))))
