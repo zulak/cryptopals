@@ -276,23 +276,23 @@
 
 ;; Challenge 9
 
-(defn add-padding [length b]
-  (let [num-padding-bytes (- length (count b))
-        result (vec b)]
-    (if (<= num-padding-bytes 0)
-      b
+(defn add-padding [block-size plaintext]
+  (let [num-padding-bytes (- block-size (count (last (partition-all block-size plaintext))))
+        result (vec plaintext)]
+    (if (= num-padding-bytes 0)
+      (into result (repeat block-size block-size))
       (into result (repeat num-padding-bytes num-padding-bytes)))))
 
 
 ;; Challenge 10
 
 (defn cbc-encrypt-msg [key iv plaintext]
-  (loop [blocks (partition-all 16 plaintext)
+  (loop [blocks (partition-all 16 (add-padding 16 plaintext))
          prev-block iv
          ciphertext []]
     (if (empty? blocks)
       ciphertext
-      (let [block (add-padding 16 (first blocks))
+      (let [block (first blocks)
             xored-block (fixed-xor prev-block block)
             encrypted-block (aes-ecb-encrypt xored-block key)]
         (recur (rest blocks) encrypted-block (into ciphertext encrypted-block))))))
@@ -303,7 +303,7 @@
          plaintext []]
     (if (empty? blocks)
       plaintext
-      (let [block (add-padding 16 (first blocks))
+      (let [block (first blocks)
             decrypted-block (aes-ecb-decrypt block key)
             plaintext-block (fixed-xor decrypted-block prev-block)]
         (recur (rest blocks) block (into plaintext plaintext-block))))))
@@ -322,7 +322,7 @@
   (mapcat (fn [x] (aes-ecb-decrypt x key)) (partition-all 16 ciphertext)))
 
 (defn ecb-encrypt-msg [key plaintext]
-  (mapcat (fn [x] (aes-ecb-encrypt (add-padding 16 x) key)) (partition-all 16 plaintext)))
+  (mapcat (fn [x] (aes-ecb-encrypt x key)) (partition-all 16 (add-padding 16 plaintext))))
 
 (defn get-random-key []
   (repeatedly 16 #(rand-int 255)))
@@ -358,7 +358,8 @@
 ;; challenge 12
 
 (def context (atom {:key (get-random-key)
-                    :secret (b64-slurp "12.txt")}))
+                    :secret (b64-slurp "12.txt")
+                    :random-prefix (repeatedly (rand-int 32) #(rand-int 256))}))
 
 (defn known-bytes [num-bytes]
   (vec (repeat num-bytes (int \A))))
@@ -385,9 +386,9 @@
 (defn get-block-for-position [block-size position ciphertext]
   (nth (partition-all block-size ciphertext) (block-for-position block-size position)))
 
-(defn padding-for-position [block-size plaintext]
+(defn padding-for-position [block-size offset plaintext]
   (let [plaintext-length (count plaintext)]
-    (known-bytes (- (dec block-size) (mod plaintext-length block-size)))))
+    (known-bytes (+ offset (- (dec block-size) (mod plaintext-length block-size))))))
 
 ;; Because ECB is stateless, all identical input blocks will produce
 ;; identical output blocks.
@@ -396,23 +397,24 @@
 ;; last value containing all possible bytes. We can use this to
 ;; comapre against the first block of ciphertext to decrypt the 1st
 ;; byte of the secret.
-(defn create-attack-dictionary [encrypt-fn block-size known-plaintext]
+(defn create-attack-dictionary [encrypt-fn block-size padding-offset known-plaintext]
   (let [position (count known-plaintext)
-        prefix (into (padding-for-position block-size known-plaintext) known-plaintext)
+        prefix (into (padding-for-position block-size padding-offset known-plaintext) known-plaintext)
         interesting-bytes (* block-size (inc (block-for-position block-size position)))]
     (apply hash-map
            (reduce into [] (for [x (range 0 256)]
                              [(get-block-for-position block-size position (encrypt-fn (conj prefix x))) x])))))
 
-(defn create-attack-ciphertext [encrypt-fn block-size known-plaintext]
+(defn create-attack-ciphertext [encrypt-fn block-size padding-offset known-plaintext]
   (let [position (count known-plaintext)
-        prefix (padding-for-position block-size known-plaintext)]
-    (get-block-for-position block-size position (encrypt-fn prefix))))
+        prefix (padding-for-position block-size padding-offset known-plaintext)
+        block (get-block-for-position block-size position (encrypt-fn prefix))]
+    block))
 
 (defn c12-get-next-byte [encrypt-fn block-size plaintext]
   (get
-   (create-attack-dictionary encrypt-fn block-size plaintext)
-   (create-attack-ciphertext encrypt-fn block-size plaintext)))
+   (create-attack-dictionary encrypt-fn block-size 0 plaintext)
+   (create-attack-ciphertext encrypt-fn block-size 0 plaintext)))
 
 ;; So this is an interesting problem. Because of the way that pkcs#7
 ;; padding works, the value of the last padding digit will change as
@@ -424,7 +426,7 @@
 (defn run12 [encrypt-fn block-size]
   (loop [x 144 plaintext [(c12-get-next-byte encrypt-fn block-size [])]]
     (if (nil? (last plaintext))
-      (drop-last plaintext)
+      (drop-last 2 plaintext)
       (recur (dec x) (conj plaintext (c12-get-next-byte encrypt-fn block-size plaintext))))))
 
 
@@ -461,6 +463,57 @@
     (<c13 (into prefix admin-ciphertext))))
 
 
+;; challenge 14
+
+;; I'm assuming that random-prefix and random-key are fixed for all encryptions...
+;; AES-128-ECB(random-prefix || attacker-controlled || target-bytes, random-key)
+
+(defn c14-encrypt [ctx attacker-plaintext]
+  (let [plaintext (-> (vec (:random-prefix @ctx))
+                      (into attacker-plaintext)
+                      (into (:secret @ctx)))]
+    (ecb-encrypt-msg (:key @ctx) plaintext)))
+
+;; find the indices of the first pair of adjacent duplicates
+(defn- find-adj-dup [coll]
+  (loop [result 0 rem coll]
+    (let [f (first rem)
+          s (second rem)]
+      (cond
+       (nil? f) nil
+       (nil? s) nil
+       (= f s) [result (inc result)]
+       :else (recur (inc result) (rest rem))))))
+
+;; find the required additional padding to push the place
+;; attacker-controlled bytes into a fresh block
+(defn find-required-padding [block-size encrypt-fn]
+  (loop [x block-size]
+    (let [ciphertext (encrypt-fn (repeat x (int \z)))
+          blocks (partition-all block-size ciphertext)
+          adj-blocks (find-adj-dup blocks)]
+      (cond
+       (> x (* 4 block-size)) nil
+       (not (nil? adj-blocks)) {:block-offset (first adj-blocks),
+                                :req-padding (- x (* 2 block-size))}
+       :else (recur (inc x))))))
+
+;; this is pretty much an identical solution to c12, except now we
+;; need to peel off the first few blocks and prepend a few extra bytes
+;; to our prefix...
+(defn c14-get-next-byte [encrypt-fn block-size block-offset padding-offset plaintext]
+  (get
+   (create-attack-dictionary #(drop (* block-size block-offset) (encrypt-fn %)) block-size padding-offset plaintext)
+   (create-attack-ciphertext #(drop (* block-size block-offset) (encrypt-fn %)) block-size padding-offset plaintext)))
+
+(defn run14 [encrypt-fn block-size]
+  (let [{:keys [req-padding block-offset]} (find-required-padding block-size encrypt-fn)]
+    (loop [x 144 plaintext [(c14-get-next-byte encrypt-fn block-size block-offset req-padding [])]]
+      (if (nil? (last plaintext))
+        (drop-last 2 plaintext)
+        (recur (dec x) (conj plaintext (c14-get-next-byte encrypt-fn block-size block-offset req-padding plaintext)))))))
+
+
 ;; challenge 15
 ;;
 ;; Write a function that takes a plaintext, determines if it has valid
@@ -468,18 +521,14 @@
 
 (defn- validate-padding [block-size last-block]
   (let [padding-length (last last-block)
-        has-padding (< padding-length block-size)]
-    (if has-padding
-      (let [num-padding-bytes (count
-                               (filter
-                                #(= % padding-length)
-                                (take-last padding-length last-block)))]
-        {:is-valid (= num-padding-bytes padding-length)
-         :length padding-length})
-      {:is-valid true
-       :length 0})))
+        num-padding-bytes (count
+                             (filter
+                              #(= % padding-length)
+                              (take-last padding-length last-block)))]
+    {:is-valid (and (= block-size (count last-block)) (= num-padding-bytes padding-length))
+     :length padding-length}))
 
-(defn unpad-plaintext [block-size plaintext]
+(defn remove-padding [block-size plaintext]
   (let [last-block (last (partition-all block-size plaintext))
         v (validate-padding block-size last-block)]
     (if (:is-valid v)
