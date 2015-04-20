@@ -25,7 +25,7 @@
 (defn str->bytes
   "Convert a String into a sequence of bytes."
   [str]
-  (seq (. str getBytes)))
+  (vec (. str getBytes)))
 
 (defn hex->int
   "Convert a String representation of a hexadecimal digit into an int."
@@ -35,29 +35,38 @@
 (defn int->hex
   "Convert an int (<= 255) into its hexadecimal String representation."
   [i]
-  {:pre [(> i -1) (< i 256)]}
   (format "%02x" i))
 
 (defn hex->bytes
   "Convert a hexadecimal string into a byte sequence."
   [h]
   (let [octets (map #(apply str %) (partition-all 2 h))]
-    (map #(Integer/parseInt % 16) octets)))
+    (vec (map #(Integer/parseInt % 16) octets))))
 
 (defn bytes->hex
   "Convert a byte sequence into a hexadecimal string."
   [b]
   (apply str (map int->hex b)))
 
+(defn- printable? [b]
+  (when (number? b)
+    (cond
+      (= b 10) true
+      (< b 31) false
+      (> b 126) false
+      :else true)))
+
 (defn bytes->ascii
   "Convert a byte sequence into its string representation."
   [b]
-  (apply str (map char b)))
+  (->> (filter printable? b)
+       (map char)
+       (apply str)))
 
 (defn b64-decode
   "Decode a Base64 encoded string into a sequence of bytes."
   [^String b64-string]
-  (seq (. (Base64/getDecoder) decode b64-string)))
+  (vec (. (Base64/getDecoder) decode b64-string)))
 
 (defn b64-encode
   "Encode a byte sequence as a Base64 encoded string."
@@ -111,10 +120,26 @@
       (into result (repeat block-size block-size))
       (into result (repeat num-padding-bytes num-padding-bytes)))))
 
+(defn- validate-pkcs7-padding
+  [block-size plaintext-bytes]
+  (let [count-expected-padding (last plaintext-bytes)]
+    (when (and (<= count-expected-padding block-size)
+               (>= (count plaintext-bytes) count-expected-padding)
+               (apply = (take-last count-expected-padding plaintext-bytes)))
+      count-expected-padding)))
+
+(defn remove-pkcs7-padding
+  [block-size plaintext-bytes]
+  (if-let [padding-bytes (validate-pkcs7-padding block-size plaintext-bytes)]
+    (drop-last padding-bytes plaintext-bytes)
+    (throw (IllegalArgumentException. "input does not contain pkcs#7 padding"))))
+
 (defn ecb-decrypt-msg
   "Decrypt a ECB-encrypted ciphertext using the provided key, returning a plaintext."
   [key ciphertext]
-  (mapcat (fn [x] (aes-ecb-decrypt x key)) (partition-all 16 ciphertext)))
+  (->> (partition-all 16 ciphertext)
+       (mapcat (fn [x] (aes-ecb-decrypt x key)))
+       (remove-pkcs7-padding 16)))
 
 (defn ecb-encrypt-msg
   "Encrypt a plaintext with the provided key, returning a ciphertext.
